@@ -1,68 +1,98 @@
 import winston from 'winston';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-import { existsSync, mkdirSync } from 'fs';
 
 const { combine, timestamp, printf, colorize, json } = winston.format;
 
-// Get the current directory in ES module
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// Define log format
-const logFormat = printf(({ level, message, timestamp, ...meta }) => {
+// Define log format for console
+const consoleFormat = printf(({ level, message, timestamp, ...meta }) => {
   let log = `${timestamp} [${level}]: ${message}`;
   
   // Add metadata if it exists
-  if (Object.keys(meta).length > 0) {
-    log += `\n${JSON.stringify(meta, null, 2)}`;
+  if (meta && Object.keys(meta).length > 0) {
+    // Skip error stack traces in production for cleaner logs
+    if (process.env.NODE_ENV !== 'development' && meta.stack) {
+      delete meta.stack;
+    }
+    if (Object.keys(meta).length > 0) {
+      log += `\n${JSON.stringify(meta, null, 2)}`;
+    }
   }
   
   return log;
 });
 
-// Ensure log directory exists (synchronously)
-const ensureLogsDir = () => {
-  const logDir = 'logs';
-  try {
-    if (!existsSync(logDir)) {
-      mkdirSync(logDir, { recursive: true });
-    }
-  } catch (error) {
-    console.error('Failed to create logs directory:', error);
-  }
-};
-
-// Create the logger
+// Create the logger with console transport only (for serverless compatibility)
 const createLogger = () => {
-  ensureLogsDir();
+  const isProduction = process.env.NODE_ENV === 'production';
+  const isVercel = process.env.VERCEL === '1';
   
+  // In Vercel, we want to use structured logs for better querying
+  const format = isVercel 
+    ? combine(
+        timestamp(),
+        json()
+      )
+    : combine(
+        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+        isProduction ? json() : colorize(),
+        consoleFormat
+      );
+
   const logger = winston.createLogger({
-    level: process.env.LOG_LEVEL || 'info',
-    format: combine(
-      timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-      json()
-    ),
+    level: process.env.LOG_LEVEL || (isProduction ? 'info' : 'debug'),
+    format,
+    defaultMeta: {
+      service: 'backend-api',
+      environment: process.env.NODE_ENV || 'development',
+      ...(isVercel && {
+        // Add Vercel-specific metadata
+        vercel: {
+          region: process.env.VERCEL_REGION || 'unknown',
+          environment: process.env.VERCEL_ENV || 'development',
+          url: process.env.VERCEL_URL || 'local'
+        }
+      })
+    },
     transports: [
       new winston.transports.Console({
         format: combine(
-          colorize(),
-          logFormat
+          timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+          isProduction ? json() : colorize(),
+          consoleFormat
         )
       })
     ]
   });
 
-  // Add file transport in production
-  if (process.env.NODE_ENV === 'production') {
-    logger.add(new winston.transports.File({ 
-      filename: 'logs/error.log', 
-      level: 'error' 
-    }));
-    logger.add(new winston.transports.File({ 
-      filename: 'logs/combined.log' 
-    }));
-  }
+  // Add request ID to logs if available
+  logger.addContext = (req) => {
+    return {
+      requestId: req.id || 'unknown',
+      path: req.path,
+      method: req.method,
+      ...(req.user && { userId: req.user.id })
+    };
+  };
+
+  // Simple wrapper for error logging
+  logger.errorWithContext = (message, error, context = {}) => {
+    const logData = {
+      ...context,
+      stack: error?.stack,
+      error: {
+        message: error?.message,
+        name: error?.name,
+        code: error?.code,
+        ...(error?.response && { response: error.response })
+      }
+    };
+    
+    // Remove undefined values
+    Object.keys(logData).forEach(key => 
+      logData[key] === undefined && delete logData[key]
+    );
+    
+    logger.error(message, logData);
+  };
 
   return logger;
 };
