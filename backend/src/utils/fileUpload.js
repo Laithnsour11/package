@@ -8,15 +8,34 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Ensure upload directory exists
-const uploadDir = process.env.UPLOAD_DIR || 'uploads';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+const uploadDirName = process.env.UPLOAD_DIR || 'uploads';
+const uploadPath = (process.env.VERCEL === '1' && !process.env.UPLOAD_DIR)
+  ? path.join('/tmp', 'uploads') // Use /tmp/uploads on Vercel if UPLOAD_DIR isn't set for cloud
+  : uploadDirName;
+
+// Check if we should attempt to create the directory
+const shouldCreateDirectory = process.env.VERCEL !== '1' || 
+                              (process.env.VERCEL === '1' && uploadPath.startsWith('/tmp'));
+
+if (shouldCreateDirectory) {
+  if (!fs.existsSync(uploadPath)) {
+    try {
+      fs.mkdirSync(uploadPath, { recursive: true });
+      logger.info(`Ensured upload directory exists: ${uploadPath}`);
+    } catch (error) {
+      logger.error(`Failed to create upload directory ${uploadPath}: ${error.message}`);
+      // Depending on strategy, might want to throw here if local dir creation fails
+      // For now, let's not throw, to allow server to start if possible
+    }
+  }
+} else if (process.env.VERCEL === '1' && !uploadPath.startsWith('/tmp')) {
+    logger.warn(`On Vercel, UPLOAD_DIR ('${uploadDirName}') is not /tmp. File uploads to this path will likely fail. Configure UPLOAD_DIR to a cloud service or ensure it points to /tmp.`);
 }
 
 // Configure multer storage
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadDir);
+    cb(null, uploadPath);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
@@ -89,5 +108,5 @@ export {
   upload,
   handleUploadErrors,
   cleanupUploads,
-  uploadDir
+  uploadPath
 };
